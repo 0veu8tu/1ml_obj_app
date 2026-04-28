@@ -7,11 +7,14 @@
     "server"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev": "npm run dev --prefix client",
     "build": "npm run build --prefix client",
-    "start": "npm run start --prefix server"
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d client/dist",
+    "start": "npm run preview --prefix client"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "gh-pages": "^6.3.0"
   }
 }

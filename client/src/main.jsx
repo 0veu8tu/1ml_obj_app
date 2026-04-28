@@ -9,59 +9,113 @@ import './styles.css';
 
 const PAGE_SIZE = 20;
 const ROW_HEIGHT = 72;
-const API = '/api';
+const TOTAL_ITEMS = 1_000_000;
+const STORAGE_KEYS = {
+  search: 'search',
+  selectedIds: 'selectedIds',
+  sort: 'sort'
+};
 
-function usePagedCollection(kind, params = {}) {
+function buildItem(id) {
+  return {
+    id,
+    title: `Object #${id.toLocaleString('en-US')}`,
+    meta: `Generated payload ${String(id).padStart(7, '0')}`
+  };
+}
+
+function parseIdQuery(query) {
+  if (!query) return null;
+  const digits = query.replace(/\D/g, '');
+  if (!digits) return null;
+
+  const id = Number.parseInt(digits, 10);
+  if (!Number.isInteger(id) || id < 1 || id > TOTAL_ITEMS) return null;
+  return id;
+}
+
+function readStoredIds() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STORAGE_KEYS.selectedIds) || '[]');
+    if (!Array.isArray(value)) return [];
+
+    const seen = new Set();
+    return value.filter((id) => {
+      const normalized = Number(id);
+      const isValid = Number.isInteger(normalized) && normalized >= 1 && normalized <= TOTAL_ITEMS && !seen.has(normalized);
+      if (isValid) seen.add(normalized);
+      return isValid;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function makePage(items, total, offset, limit) {
+  return {
+    items,
+    total,
+    nextOffset: offset + items.length < total ? offset + items.length : null
+  };
+}
+
+function getAvailablePage({ query, sort, offset, limit, selectedSet }) {
+  const directId = parseIdQuery(query);
+
+  if (directId !== null) {
+    if (selectedSet.has(directId)) return makePage([], 0, offset, limit);
+    return offset === 0 ? makePage([buildItem(directId)], 1, offset, limit) : makePage([], 1, offset, limit);
+  }
+
+  const total = TOTAL_ITEMS - selectedSet.size;
+  const items = [];
+  let seenAvailable = 0;
+  let id = sort === 'asc' ? 1 : TOTAL_ITEMS;
+  const step = sort === 'asc' ? 1 : -1;
+
+  while (id >= 1 && id <= TOTAL_ITEMS && items.length < limit) {
+    if (!selectedSet.has(id)) {
+      if (seenAvailable >= offset) items.push(buildItem(id));
+      seenAvailable += 1;
+    }
+
+    id += step;
+  }
+
+  return makePage(items, total, offset, limit);
+}
+
+function getSelectedPage({ query, offset, limit, selectedIds }) {
+  const directId = parseIdQuery(query);
+  const source = directId === null ? selectedIds : selectedIds.filter((id) => id === directId);
+  const items = source.slice(offset, offset + limit).map(buildItem);
+  return makePage(items, source.length, offset, limit);
+}
+
+function usePagedCollection(getPage, deps) {
   const [items, setItems] = React.useState([]);
   const [total, setTotal] = React.useState(0);
   const [nextOffset, setNextOffset] = React.useState(0);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState('');
-  const requestId = React.useRef(0);
-
-  const queryKey = JSON.stringify(params);
 
   const loadPage = React.useCallback(
-    async (offset = 0, replace = false) => {
-      const id = ++requestId.current;
-      const search = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        offset: String(offset),
-        ...params
-      });
-
-      setLoading(true);
-      setError('');
-
-      try {
-        const response = await fetch(`${API}/${kind}?${search}`);
-        if (!response.ok) throw new Error('Request failed');
-        const data = await response.json();
-        if (id !== requestId.current) return;
-
-        setItems((current) => (replace ? data.items : [...current, ...data.items]));
-        setTotal(data.total);
-        setNextOffset(data.nextOffset);
-      } catch (err) {
-        if (id === requestId.current) setError(err.message);
-      } finally {
-        if (id === requestId.current) setLoading(false);
-      }
+    (offset = 0, replace = false) => {
+      const data = getPage(offset);
+      setItems((current) => (replace ? data.items : [...current, ...data.items]));
+      setTotal(data.total);
+      setNextOffset(data.nextOffset);
     },
-    [kind, queryKey]
+    deps
   );
 
   React.useEffect(() => {
-    setItems([]);
-    setNextOffset(0);
     loadPage(0, true);
   }, [loadPage]);
 
   const loadMore = React.useCallback(() => {
-    if (!loading && nextOffset !== null) loadPage(nextOffset, false);
-  }, [loadPage, loading, nextOffset]);
+    if (nextOffset !== null) loadPage(nextOffset, false);
+  }, [loadPage, nextOffset]);
 
-  return { items, setItems, total, nextOffset, loading, error, reload: () => loadPage(0, true), loadMore };
+  return { items, setItems, total, loading: false, error: '', reload: () => loadPage(0, true), loadMore };
 }
 
 function useDebouncedValue(value, delay = 250) {
@@ -79,7 +133,7 @@ function Toolbar({ search, onSearch, sort, onSort, onRefresh, selectedCount }) {
   return (
     <header className="toolbar">
       <div>
-        <p className="eyebrow">Server state</p>
+        <p className="eyebrow">Local state</p>
         <h1>Million Objects</h1>
       </div>
       <div className="toolbar-actions">
@@ -188,82 +242,63 @@ function VirtualPanel({ title, subtitle, items, total, loading, error, loadMore,
 }
 
 function App() {
-  const [search, setSearch] = React.useState(() => localStorage.getItem('search') || '');
-  const [sort, setSort] = React.useState(() => localStorage.getItem('sort') || 'asc');
-  const [selectedCount, setSelectedCount] = React.useState(0);
+  const [search, setSearch] = React.useState(() => localStorage.getItem(STORAGE_KEYS.search) || '');
+  const [sort, setSort] = React.useState(() => localStorage.getItem(STORAGE_KEYS.sort) || 'asc');
+  const [selectedIds, setSelectedIds] = React.useState(readStoredIds);
   const debouncedSearch = useDebouncedValue(search);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-
-  const available = usePagedCollection('items', { q: debouncedSearch, sort });
-  const selected = usePagedCollection('selected', { q: debouncedSearch });
+  const selectedSet = React.useMemo(() => new Set(selectedIds), [selectedIds]);
   const dragDisabled = debouncedSearch.length > 0;
 
+  const available = usePagedCollection(
+    (offset) => getAvailablePage({ query: debouncedSearch, sort, offset, limit: PAGE_SIZE, selectedSet }),
+    [debouncedSearch, sort, selectedSet]
+  );
+
+  const selected = usePagedCollection(
+    (offset) => getSelectedPage({ query: debouncedSearch, offset, limit: PAGE_SIZE, selectedIds }),
+    [debouncedSearch, selectedIds]
+  );
+
   React.useEffect(() => {
-    localStorage.setItem('search', search);
+    localStorage.setItem(STORAGE_KEYS.search, search);
   }, [search]);
 
   React.useEffect(() => {
-    localStorage.setItem('sort', sort);
+    localStorage.setItem(STORAGE_KEYS.sort, sort);
   }, [sort]);
 
   React.useEffect(() => {
-    fetch(`${API}/state`)
-      .then((response) => response.json())
-      .then((state) => setSelectedCount(state.selectedCount))
-      .catch(() => {});
-  }, []);
+    localStorage.setItem(STORAGE_KEYS.selectedIds, JSON.stringify(selectedIds));
+  }, [selectedIds]);
 
   const refreshAll = React.useCallback(() => {
     available.reload();
     selected.reload();
-    fetch(`${API}/state`)
-      .then((response) => response.json())
-      .then((state) => setSelectedCount(state.selectedCount))
-      .catch(() => {});
   }, [available, selected]);
 
-  const addItem = async (id) => {
-    const response = await fetch(`${API}/selected/${id}`, { method: 'POST' });
-    if (!response.ok) return;
-    const data = await response.json();
-    setSelectedCount(data.selectedCount);
-    refreshAll();
+  const addItem = (id) => {
+    setSelectedIds((current) => (current.includes(id) ? current : [...current, id]));
   };
 
-  const removeItem = async (id) => {
-    const response = await fetch(`${API}/selected/${id}`, { method: 'DELETE' });
-    if (!response.ok) return;
-    const data = await response.json();
-    setSelectedCount(data.selectedCount);
-    refreshAll();
+  const removeItem = (id) => {
+    setSelectedIds((current) => current.filter((selectedId) => selectedId !== id));
   };
 
-  const handleDragEnd = async ({ active, over }) => {
+  const handleDragEnd = ({ active, over }) => {
     if (dragDisabled) return;
     if (!over || active.id === over.id) return;
 
-    const oldIndex = selected.items.findIndex((item) => item.id === active.id);
-    const newIndex = selected.items.findIndex((item) => item.id === over.id);
-    if (oldIndex === -1 || newIndex === -1) return;
+    setSelectedIds((current) => {
+      const oldIndex = current.indexOf(active.id);
+      const newIndex = current.indexOf(over.id);
+      if (oldIndex === -1 || newIndex === -1) return current;
 
-    const nextItems = [...selected.items];
-    const [moved] = nextItems.splice(oldIndex, 1);
-    nextItems.splice(newIndex, 0, moved);
-    selected.setItems(nextItems);
-
-    const stateResponse = await fetch(`${API}/state`);
-    const state = await stateResponse.json();
-    const pageIds = nextItems.map((item) => item.id);
-    const nextIds = [...state.selectedIds];
-    nextIds.splice(0, pageIds.length, ...pageIds);
-
-    const response = await fetch(`${API}/selected/reorder`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: nextIds })
+      const nextIds = [...current];
+      const [moved] = nextIds.splice(oldIndex, 1);
+      nextIds.splice(newIndex, 0, moved);
+      return nextIds;
     });
-
-    if (!response.ok) selected.reload();
   };
 
   return (
@@ -274,13 +309,13 @@ function App() {
         sort={sort}
         onSort={setSort}
         onRefresh={refreshAll}
-        selectedCount={selectedCount}
+        selectedCount={selectedIds.length}
       />
 
       <div className="workspace">
         <VirtualPanel
           title="Доступные"
-          subtitle="Пагинация, поиск и сортировка на Express"
+          subtitle="Пагинация, поиск и сортировка работают прямо в браузере"
           items={available.items}
           total={available.total}
           loading={available.loading}
@@ -294,7 +329,7 @@ function App() {
           <SortableContext items={selected.items.map((item) => item.id)} strategy={verticalListSortingStrategy}>
             <VirtualPanel
               title="Выбранные"
-              subtitle={dragDisabled ? 'Очистите поиск для перестановки' : 'Порядок сохраняется на сервере'}
+              subtitle={dragDisabled ? 'Очистите поиск для перестановки' : 'Порядок сохраняется в этом браузере'}
               items={selected.items}
               total={selected.total}
               loading={selected.loading}
